@@ -1,0 +1,1235 @@
+diff --git a/drivers/ata/ahci.c b/drivers/ata/ahci.c
+index 94c3cc0..c077f61 100644
+--- a/drivers/ata/ahci.c
++++ b/drivers/ata/ahci.c
+@@ -45,6 +45,7 @@
+ #include <scsi/scsi_host.h>
+ #include <scsi/scsi_cmnd.h>
+ #include <linux/libata.h>
++#include <linux/dynaccel.h>
+ 
+ #define DRV_NAME	"ahci"
+ #define DRV_VERSION	"3.0"
+@@ -608,7 +609,7 @@ static void ahci_enable_ahci(void __iomem *mmio)
+ 		tmp = readl(mmio + HOST_CTL);	/* flush && sanity check */
+ 		if (tmp & HOST_AHCI_EN)
+ 			return;
+-		msleep(10);
++		msleep(10 * speedup_ratio);
+ 	}
+ 
+ 	WARN_ON(1);
+@@ -917,7 +918,7 @@ static void ahci_disable_alpm(struct ata_port *ap)
+ 	cmd = readl(port_mmio + PORT_CMD);
+ 
+ 	/* wait 10ms to be sure we've come out of any low power state */
+-	msleep(10);
++	msleep(10 * speedup_ratio);
+ 
+ 	/* clear out any PhyRdy stuff from interrupt status */
+ 	writel(PORT_IRQ_PHYRDY, port_mmio + PORT_IRQ_STAT);
+@@ -1093,7 +1094,7 @@ static int ahci_reset_controller(struct ata_host *host)
+ 		/* reset must complete within 1 second, or
+ 		 * the hardware should be considered fried.
+ 		 */
+-		ssleep(1);
++		ssleep(1 * speedup_ratio);
+ 
+ 		tmp = readl(mmio + HOST_CTL);
+ 		if (tmp & HOST_RESET) {
+@@ -1302,7 +1303,7 @@ static int ahci_exec_polled_cmd(struct ata_port *ap, int pmp,
+ 
+ 	if (timeout_msec) {
+ 		tmp = ata_wait_register(port_mmio + PORT_CMD_ISSUE, 0x1, 0x1,
+-					1, timeout_msec);
++					1, timeout_msec * speedup_ratio);
+ 		if (tmp & 0x1) {
+ 			ahci_kick_engine(ap, 1);
+ 			return -EBUSY;
+@@ -1348,7 +1349,7 @@ static int ahci_do_softreset(struct ata_link *link, unsigned int *class,
+ 	}
+ 
+ 	/* spec says at least 5us, but be generous and sleep for 1ms */
+-	msleep(1);
++	msleep(1 * speedup_ratio);
+ 
+ 	/* issue the second D2H Register FIS */
+ 	tf.ctl &= ~ATA_SRST;
+@@ -1529,7 +1530,7 @@ static int ahci_p5wdh_hardreset(struct ata_link *link, unsigned int *class,
+ 	 * suffice while making probing snappish enough.
+ 	 */
+ 	if (online) {
+-		rc = ata_wait_after_reset(link, jiffies + 2 * HZ,
++		rc = ata_wait_after_reset(link, jiffies + 2 * HZ * speedup_ratio,
+ 					  ahci_check_ready);
+ 		if (rc)
+ 			ahci_kick_engine(ap, 0);
+diff --git a/drivers/ata/ata_piix.c b/drivers/ata/ata_piix.c
+index dfdca94..feec773 100644
+--- a/drivers/ata/ata_piix.c
++++ b/drivers/ata/ata_piix.c
+@@ -92,6 +92,7 @@
+ #include <scsi/scsi_host.h>
+ #include <linux/libata.h>
+ #include <linux/dmi.h>
++#include <linux/dynaccel.h>
+ 
+ #define DRV_NAME	"ata_piix"
+ #define DRV_VERSION	"2.12"
+@@ -1269,7 +1270,7 @@ static void __devinit piix_init_pcs(struct ata_host *host,
+ 	if (new_pcs != pcs) {
+ 		DPRINTK("updating PCS from 0x%x to 0x%x\n", pcs, new_pcs);
+ 		pci_write_config_word(pdev, ICH5_PCS, new_pcs);
+-		msleep(150);
++		msleep(150 * speedup_ratio);
+ 	}
+ }
+ 
+diff --git a/drivers/ata/libata-core.c b/drivers/ata/libata-core.c
+index 303fc0d..5cecf74 100644
+--- a/drivers/ata/libata-core.c
++++ b/drivers/ata/libata-core.c
+@@ -57,6 +57,7 @@
+ #include <linux/jiffies.h>
+ #include <linux/scatterlist.h>
+ #include <linux/io.h>
++#include <linux/dynaccel.h>
+ #include <scsi/scsi.h>
+ #include <scsi/scsi_cmnd.h>
+ #include <scsi/scsi_host.h>
+@@ -1685,7 +1686,7 @@ unsigned ata_exec_internal_sg(struct ata_device *dev,
+ 	spin_unlock_irqrestore(ap->lock, flags);
+ 
+ 	if (!timeout)
+-		timeout = ata_probe_timeout * 1000 / HZ;
++		timeout = (ata_probe_timeout * 1000 / HZ) * speedup_ratio;
+ 
+ 	rc = wait_for_completion_timeout(&wait, msecs_to_jiffies(timeout));
+ 
+@@ -3319,7 +3320,7 @@ int ata_wait_ready(struct ata_link *link, unsigned long deadline,
+ 		   int (*check_ready)(struct ata_link *link))
+ {
+ 	unsigned long start = jiffies;
+-	unsigned long nodev_deadline = start + ATA_TMOUT_FF_WAIT;
++	unsigned long nodev_deadline = start + ATA_TMOUT_FF_WAIT * speedup_ratio;
+ 	int warned = 0;
+ 
+ 	if (time_after(nodev_deadline, deadline))
+@@ -3358,15 +3359,15 @@ int ata_wait_ready(struct ata_link *link, unsigned long deadline,
+ 		if (time_after(now, deadline))
+ 			return -EBUSY;
+ 
+-		if (!warned && time_after(now, start + 5 * HZ) &&
+-		    (deadline - now > 3 * HZ)) {
++		if (!warned && time_after(now, start + 5 * HZ * speedup_ratio) &&
++		    (deadline - now > 3 * HZ * speedup_ratio)) {
+ 			ata_link_printk(link, KERN_WARNING,
+ 				"link is slow to respond, please be patient "
+ 				"(ready=%d)\n", tmp);
+ 			warned = 1;
+ 		}
+ 
+-		msleep(50);
++		msleep(50 * speedup_ratio);
+ 	}
+ }
+ 
+@@ -3387,7 +3388,7 @@ int ata_wait_ready(struct ata_link *link, unsigned long deadline,
+ int ata_wait_after_reset(struct ata_link *link, unsigned long deadline,
+ 				int (*check_ready)(struct ata_link *link))
+ {
+-	msleep(ATA_WAIT_AFTER_RESET_MSECS);
++	msleep(ATA_WAIT_AFTER_RESET_MSECS * speedup_ratio);
+ 
+ 	return ata_wait_ready(link, deadline, check_ready);
+ }
+@@ -3423,7 +3424,7 @@ int sata_link_debounce(struct ata_link *link, const unsigned long *params,
+ 	u32 last, cur;
+ 	int rc;
+ 
+-	t = jiffies + msecs_to_jiffies(params[2]);
++	t = jiffies + msecs_to_jiffies(params[2]) * speedup_ratio;
+ 	if (time_before(t, deadline))
+ 		deadline = t;
+ 
+@@ -3435,7 +3436,7 @@ int sata_link_debounce(struct ata_link *link, const unsigned long *params,
+ 	last_jiffies = jiffies;
+ 
+ 	while (1) {
+-		msleep(interval_msec);
++		msleep(interval_msec * speedup_ratio);
+ 		if ((rc = sata_scr_read(link, SCR_STATUS, &cur)))
+ 			return rc;
+ 		cur &= 0xf;
+@@ -3444,7 +3445,7 @@ int sata_link_debounce(struct ata_link *link, const unsigned long *params,
+ 		if (cur == last) {
+ 			if (cur == 1 && time_before(jiffies, deadline))
+ 				continue;
+-			if (time_after(jiffies, last_jiffies + duration))
++			if (time_after(jiffies, last_jiffies + duration * speedup_ratio))
+ 				return 0;
+ 			continue;
+ 		}
+@@ -3492,7 +3493,7 @@ int sata_link_resume(struct ata_link *link, const unsigned long *params,
+ 	/* Some PHYs react badly if SStatus is pounded immediately
+ 	 * after resuming.  Delay 200ms before debouncing.
+ 	 */
+-	msleep(200);
++	msleep(200 * speedup_ratio);
+ 
+ 	if ((rc = sata_link_debounce(link, params, deadline)))
+ 		return rc;
+@@ -3613,7 +3614,7 @@ int sata_link_hardreset(struct ata_link *link, const unsigned long *timing,
+ 	/* Couldn't find anything in SATA I/II specs, but AHCI-1.1
+ 	 * 10.4.2 says at least 1 ms.
+ 	 */
+-	msleep(1);
++	msleep(1 * speedup_ratio);
+ 
+ 	/* bring link back */
+ 	rc = sata_link_resume(link, timing, deadline);
+@@ -3636,7 +3637,7 @@ int sata_link_hardreset(struct ata_link *link, const unsigned long *timing,
+ 		if (check_ready) {
+ 			unsigned long pmp_deadline;
+ 
+-			pmp_deadline = jiffies + ATA_TMOUT_PMP_SRST_WAIT;
++			pmp_deadline = jiffies + ATA_TMOUT_PMP_SRST_WAIT * speedup_ratio;
+ 			if (time_after(pmp_deadline, deadline))
+ 				pmp_deadline = deadline;
+ 			ata_wait_ready(link, pmp_deadline, check_ready);
+@@ -6073,7 +6074,7 @@ static void __init ata_parse_force_param(void)
+ 
+ static int __init ata_init(void)
+ {
+-	ata_probe_timeout *= HZ;
++	ata_probe_timeout *= HZ * speedup_ratio;
+ 
+ 	ata_parse_force_param();
+ 
+@@ -6113,7 +6114,7 @@ int ata_ratelimit(void)
+ 
+ 	if (time_after(jiffies, ratelimit_time)) {
+ 		rc = 1;
+-		ratelimit_time = jiffies + (HZ/5);
++		ratelimit_time = jiffies + (HZ/5) * speedup_ratio;
+ 	} else
+ 		rc = 0;
+ 
+@@ -6158,10 +6159,10 @@ u32 ata_wait_register(void __iomem *reg, u32 mask, u32 val,
+ 	 * preceding writes reach the controller before starting to
+ 	 * eat away the timeout.
+ 	 */
+-	timeout = jiffies + (timeout_msec * HZ) / 1000;
++	timeout = jiffies + ((timeout_msec * HZ) / 1000) * speedup_ratio;
+ 
+ 	while ((tmp & mask) == val && time_before(jiffies, timeout)) {
+-		msleep(interval_msec);
++		msleep(interval_msec * speedup_ratio);
+ 		tmp = ioread32(reg);
+ 	}
+ 
+diff --git a/drivers/ata/libata-eh.c b/drivers/ata/libata-eh.c
+index 1cb71cd..d8dff3e 100644
+--- a/drivers/ata/libata-eh.c
++++ b/drivers/ata/libata-eh.c
+@@ -42,6 +42,7 @@
+ #include "../scsi/scsi_transport_api.h"
+ 
+ #include <linux/libata.h>
++#include <linux/dynaccel.h>
+ 
+ #include "libata.h"
+ 
+@@ -592,7 +593,7 @@ void ata_port_wait_eh(struct ata_port *ap)
+ 
+ 	/* make sure SCSI EH is complete */
+ 	if (scsi_host_in_recovery(ap->scsi_host)) {
+-		msleep(10);
++		msleep(10 * speedup_ratio);
+ 		goto retry;
+ 	}
+ }
+@@ -641,7 +642,7 @@ void ata_eh_fastdrain_timerfn(unsigned long arg)
+ 		/* some qcs have finished, give it another chance */
+ 		ap->fastdrain_cnt = cnt;
+ 		ap->fastdrain_timer.expires =
+-			jiffies + ATA_EH_FASTDRAIN_INTERVAL;
++			jiffies + ATA_EH_FASTDRAIN_INTERVAL * speedup_ratio;
+ 		add_timer(&ap->fastdrain_timer);
+ 	}
+ 
+@@ -681,7 +682,7 @@ static void ata_eh_set_pending(struct ata_port *ap, int fastdrain)
+ 
+ 	/* activate fast drain */
+ 	ap->fastdrain_cnt = cnt;
+-	ap->fastdrain_timer.expires = jiffies + ATA_EH_FASTDRAIN_INTERVAL;
++	ap->fastdrain_timer.expires = jiffies + ATA_EH_FASTDRAIN_INTERVAL * speedup_ratio;
+ 	add_timer(&ap->fastdrain_timer);
+ }
+ 
+@@ -1574,7 +1575,7 @@ static int speed_down_verdict_cb(struct ata_ering_entry *ent, void *void_arg)
+  */
+ static unsigned int ata_eh_speed_down_verdict(struct ata_device *dev)
+ {
+-	const u64 j5mins = 5LLU * 60 * HZ, j10mins = 10LLU * 60 * HZ;
++	const u64 j5mins = 5LLU * 60 * HZ * speedup_ratio, j10mins = 10LLU * 60 * HZ * speedup_ratio;
+ 	u64 j64 = get_jiffies_64();
+ 	struct speed_down_verdict_arg arg;
+ 	unsigned int verdict = 0;
+@@ -2119,7 +2120,7 @@ int ata_eh_reset(struct ata_link *link, int classify,
+ 	}
+ 
+ 	if (prereset) {
+-		rc = prereset(link, jiffies + ATA_EH_PRERESET_TIMEOUT);
++		rc = prereset(link, jiffies + (ATA_EH_PRERESET_TIMEOUT) * speedup_ratio);
+ 		if (rc) {
+ 			if (rc == -ENOENT) {
+ 				ata_link_printk(link, KERN_DEBUG,
+@@ -2157,7 +2158,7 @@ int ata_eh_reset(struct ata_link *link, int classify,
+ 	if (ata_is_host_link(link))
+ 		ata_eh_freeze_port(ap);
+ 
+-	deadline = jiffies + ata_eh_reset_timeouts[try++];
++	deadline = jiffies + ata_eh_reset_timeouts[try++] * speedup_ratio;
+ 
+ 	if (reset) {
+ 		if (verbose)
+@@ -2744,10 +2745,10 @@ dev_fail:
+ 		if (nr_failed_devs != nr_disabled_devs) {
+ 			ata_port_printk(ap, KERN_WARNING, "failed to recover "
+ 					"some devices, retrying in 5 secs\n");
+-			ssleep(5);
++			ssleep(5 * speedup_ratio);
+ 		} else {
+ 			/* no device left to recover, repeat fast */
+-			msleep(500);
++			msleep(500 * speedup_ratio);
+ 		}
+ 
+ 		goto retry;
+diff --git a/drivers/ata/libata-pmp.c b/drivers/ata/libata-pmp.c
+index 7daf4c0..22fee18 100644
+--- a/drivers/ata/libata-pmp.c
++++ b/drivers/ata/libata-pmp.c
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/kernel.h>
+ #include <linux/libata.h>
++#include <linux/dynaccel.h>
+ #include "libata.h"
+ 
+ const struct ata_port_operations sata_pmp_port_ops = {
+@@ -48,7 +49,7 @@ static unsigned int sata_pmp_read(struct ata_link *link, int reg, u32 *r_val)
+ 	tf.device = link->pmp;
+ 
+ 	err_mask = ata_exec_internal(pmp_dev, &tf, NULL, DMA_NONE, NULL, 0,
+-				     SATA_PMP_RW_TIMEOUT);
++				     SATA_PMP_RW_TIMEOUT * speedup_ratio);
+ 	if (err_mask)
+ 		return err_mask;
+ 
+@@ -88,7 +89,7 @@ static unsigned int sata_pmp_write(struct ata_link *link, int reg, u32 val)
+ 	tf.lbah = (val >> 24) & 0xff;
+ 
+ 	return ata_exec_internal(pmp_dev, &tf, NULL, DMA_NONE, NULL, 0,
+-				 SATA_PMP_RW_TIMEOUT);
++				 SATA_PMP_RW_TIMEOUT * speedup_ratio);
+ }
+ 
+ /**
+@@ -739,7 +740,7 @@ static int sata_pmp_eh_recover_pmp(struct ata_port *ap,
+ 				       "retrying reset%s\n",
+ 				       sleep ? " in 5 secs" : "");
+ 			if (sleep)
+-				ssleep(5);
++				ssleep(5 * speedup_ratio);
+ 			ehc->i.action |= ATA_EH_RESET;
+ 			goto retry;
+ 		} else {
+@@ -785,7 +786,7 @@ static int sata_pmp_eh_handle_disabled_links(struct ata_port *ap)
+ 		 * SError.N working.
+ 		 */
+ 		sata_link_hardreset(link, sata_deb_timing_normal,
+-				jiffies + ATA_TMOUT_INTERNAL_QUICK, NULL, NULL);
++				jiffies + ATA_TMOUT_INTERNAL_QUICK * speedup_ratio, NULL, NULL);
+ 
+ 		/* unconditionally clear SError.N */
+ 		rc = sata_scr_write(link, SCR_ERROR, SERR_PHYRDY_CHG);
+@@ -993,7 +994,7 @@ static int sata_pmp_eh_recover(struct ata_port *ap)
+ 		ata_port_printk(ap, KERN_WARNING,
+ 				"failed to recover PMP, retrying in 5 secs\n");
+ 		pmp_ehc->i.action |= ATA_EH_RESET;
+-		ssleep(5);
++		ssleep(5 * speedup_ratio);
+ 		goto retry;
+ 	}
+ 
+diff --git a/drivers/ata/libata-scsi.c b/drivers/ata/libata-scsi.c
+index 57a4364..2c49055 100644
+--- a/drivers/ata/libata-scsi.c
++++ b/drivers/ata/libata-scsi.c
+@@ -46,6 +46,7 @@
+ #include <linux/libata.h>
+ #include <linux/hdreg.h>
+ #include <linux/uaccess.h>
++#include <linux/dynaccel.h>
+ 
+ #include "libata.h"
+ 
+@@ -332,7 +333,7 @@ int ata_cmd_ioctl(struct scsi_device *scsidev, void __user *arg)
+ 	/* Good values for timeout and retries?  Values below
+ 	   from scsi_ioctl_send_command() for default case... */
+ 	cmd_result = scsi_execute(scsidev, scsi_cmd, data_dir, argbuf, argsize,
+-				  sensebuf, (10*HZ), 5, 0);
++				  sensebuf, (10*HZ)*speedup_ratio, 5, 0);
+ 
+ 	if (driver_byte(cmd_result) == DRIVER_SENSE) {/* sense data available */
+ 		u8 *desc = sensebuf + 8;
+@@ -418,7 +419,7 @@ int ata_task_ioctl(struct scsi_device *scsidev, void __user *arg)
+ 	/* Good values for timeout and retries?  Values below
+ 	   from scsi_ioctl_send_command() for default case... */
+ 	cmd_result = scsi_execute(scsidev, scsi_cmd, DMA_NONE, NULL, 0,
+-				sensebuf, (10*HZ), 5, 0);
++				sensebuf, (10*HZ)*speedup_ratio, 5, 0);
+ 
+ 	if (driver_byte(cmd_result) == DRIVER_SENSE) {/* sense data available */
+ 		u8 *desc = sensebuf + 8;
+@@ -1045,7 +1046,7 @@ static void ata_delayed_done(struct scsi_cmnd *scmd)
+ 	static struct timer_list timer;
+ 
+ 	setup_timer(&timer, ata_delayed_done_timerfn, (unsigned long)scmd);
+-	mod_timer(&timer, jiffies + 5 * HZ);
++	mod_timer(&timer, jiffies + 5 * HZ * speedup_ratio);
+ }
+ 
+ /**
+@@ -3090,7 +3091,7 @@ void ata_scsi_scan_host(struct ata_port *ap, int sync)
+ 		 * any progress, sleep briefly and repeat.
+ 		 */
+ 		if (dev != last_failed_dev) {
+-			msleep(100);
++			msleep(100 * speedup_ratio);
+ 			last_failed_dev = dev;
+ 			goto repeat;
+ 		}
+@@ -3099,7 +3100,7 @@ void ata_scsi_scan_host(struct ata_port *ap, int sync)
+ 		 * a few more chances.
+ 		 */
+ 		if (--tries) {
+-			msleep(100);
++			msleep(100 * speedup_ratio);
+ 			goto repeat;
+ 		}
+ 
+@@ -3109,7 +3110,7 @@ void ata_scsi_scan_host(struct ata_port *ap, int sync)
+ 	}
+ 
+ 	queue_delayed_work(ata_aux_wq, &ap->hotplug_task,
+-			   round_jiffies_relative(HZ));
++			   round_jiffies_relative(HZ) * speedup_ratio);
+ }
+ 
+ /**
+diff --git a/drivers/ata/libata-sff.c b/drivers/ata/libata-sff.c
+index c0908c2..32dd789 100644
+--- a/drivers/ata/libata-sff.c
++++ b/drivers/ata/libata-sff.c
+@@ -36,6 +36,7 @@
+ #include <linux/pci.h>
+ #include <linux/libata.h>
+ #include <linux/highmem.h>
++#include <linux/dynaccel.h>
+ 
+ #include "libata.h"
+ 
+@@ -368,7 +369,7 @@ int ata_sff_busy_sleep(struct ata_port *ap,
+ 	timeout = timer_start + tmout_pat;
+ 	while (status != 0xff && (status & ATA_BUSY) &&
+ 	       time_before(jiffies, timeout)) {
+-		msleep(50);
++		msleep(50 * speedup_ratio);
+ 		status = ata_sff_busy_wait(ap, ATA_BUSY, 3);
+ 	}
+ 
+@@ -380,7 +381,7 @@ int ata_sff_busy_sleep(struct ata_port *ap,
+ 	timeout = timer_start + tmout;
+ 	while (status != 0xff && (status & ATA_BUSY) &&
+ 	       time_before(jiffies, timeout)) {
+-		msleep(50);
++		msleep(50 * speedup_ratio);
+ 		status = ap->ops->sff_check_status(ap);
+ 	}
+ 
+@@ -482,7 +483,7 @@ void ata_dev_select(struct ata_port *ap, unsigned int device,
+ 
+ 	if (wait) {
+ 		if (can_sleep && ap->link.device[device].class == ATA_DEV_ATAPI)
+-			msleep(150);
++			msleep(150 * speedup_ratio);
+ 		ata_wait_idle(ap);
+ 	}
+ }
+@@ -1355,7 +1356,7 @@ fsm_start:
+ 	 */
+ 	status = ata_sff_busy_wait(ap, ATA_BUSY, 5);
+ 	if (status & ATA_BUSY) {
+-		msleep(2);
++		msleep(2 * speedup_ratio);
+ 		status = ata_sff_busy_wait(ap, ATA_BUSY, 10);
+ 		if (status & ATA_BUSY) {
+ 			ata_pio_queue_task(ap, qc, ATA_SHORT_PAUSE);
+@@ -1888,7 +1889,7 @@ int ata_sff_wait_after_reset(struct ata_link *link, unsigned int devmask,
+ 	unsigned int dev1 = devmask & (1 << 1);
+ 	int rc, ret = 0;
+ 
+-	msleep(ATA_WAIT_AFTER_RESET_MSECS);
++	msleep(ATA_WAIT_AFTER_RESET_MSECS * speedup_ratio);
+ 
+ 	/* always check readiness of the master device */
+ 	rc = ata_sff_wait_ready(link, deadline);
+@@ -1917,7 +1918,7 @@ int ata_sff_wait_after_reset(struct ata_link *link, unsigned int devmask,
+ 			lbal = ioread8(ioaddr->lbal_addr);
+ 			if ((nsect == 1) && (lbal == 1))
+ 				break;
+-			msleep(50);	/* give drive a breather */
++			msleep(50 * speedup_ratio);	/* give drive a breather */
+ 		}
+ 
+ 		rc = ata_sff_wait_ready(link, deadline);
+@@ -2371,7 +2372,7 @@ void ata_bus_reset(struct ata_port *ap)
+ 
+ 	/* issue bus reset */
+ 	if (ap->flags & ATA_FLAG_SRST) {
+-		rc = ata_bus_softreset(ap, devmask, jiffies + 40 * HZ);
++		rc = ata_bus_softreset(ap, devmask, jiffies + 40 * HZ * speedup_ratio);
+ 		if (rc && rc != -ENODEV)
+ 			goto err_out;
+ 	}
+diff --git a/drivers/ata/sata_sil24.c b/drivers/ata/sata_sil24.c
+index 84ffcc2..b5219b2 100644
+--- a/drivers/ata/sata_sil24.c
++++ b/drivers/ata/sata_sil24.c
+@@ -28,6 +28,7 @@
+ #include <scsi/scsi_host.h>
+ #include <scsi/scsi_cmnd.h>
+ #include <linux/libata.h>
++#include <linux/dynaccel.h>
+ 
+ #define DRV_NAME	"sata_sil24"
+ #define DRV_VERSION	"1.1"
+@@ -592,9 +593,9 @@ static int sil24_init_port(struct ata_port *ap)
+ 
+ 	writel(PORT_CS_INIT, port + PORT_CTRL_STAT);
+ 	ata_wait_register(port + PORT_CTRL_STAT,
+-			  PORT_CS_INIT, PORT_CS_INIT, 10, 100);
++			  PORT_CS_INIT, PORT_CS_INIT, 10, 100 * speedup_ratio);
+ 	tmp = ata_wait_register(port + PORT_CTRL_STAT,
+-				PORT_CS_RDY, 0, 10, 100);
++				PORT_CS_RDY, 0, 10, 100 * speedup_ratio);
+ 
+ 	if ((tmp & (PORT_CS_INIT | PORT_CS_RDY)) != PORT_CS_RDY) {
+ 		pp->do_port_rst = 1;
+@@ -629,7 +630,7 @@ static int sil24_exec_polled_cmd(struct ata_port *ap, int pmp,
+ 
+ 	irq_mask = (PORT_IRQ_COMPLETE | PORT_IRQ_ERROR) << PORT_IRQ_RAW_SHIFT;
+ 	irq_stat = ata_wait_register(port + PORT_IRQ_STAT, irq_mask, 0x0,
+-				     10, timeout_msec);
++				     10, timeout_msec * speedup_ratio);
+ 
+ 	writel(irq_mask, port + PORT_IRQ_STAT); /* clear IRQs */
+ 	irq_stat >>= PORT_IRQ_RAW_SHIFT;
+@@ -719,7 +720,7 @@ static int sil24_hardreset(struct ata_link *link, unsigned int *class,
+ 		msleep(10);
+ 		writel(PORT_CS_PORT_RST, port + PORT_CTRL_CLR);
+ 		ata_wait_register(port + PORT_CTRL_STAT, PORT_CS_RDY, 0,
+-				  10, 5000);
++				  10, 5000 * speedup_ratio);
+ 
+ 		/* restore port configuration */
+ 		sil24_config_port(ap);
+@@ -739,7 +740,7 @@ static int sil24_hardreset(struct ata_link *link, unsigned int *class,
+ 	writel(PORT_CS_DEV_RST, port + PORT_CTRL_STAT);
+ 	tmp = ata_wait_register(port + PORT_CTRL_STAT,
+ 				PORT_CS_DEV_RST, PORT_CS_DEV_RST, 10,
+-				tout_msec);
++				tout_msec * speedup_ratio);
+ 
+ 	/* SStatus oscillates between zero and valid status after
+ 	 * DEV_RST, debounce it.
+@@ -1241,7 +1242,7 @@ static void sil24_init_controller(struct ata_host *host)
+ 			writel(PORT_CS_PORT_RST, port + PORT_CTRL_CLR);
+ 			tmp = ata_wait_register(port + PORT_CTRL_STAT,
+ 						PORT_CS_PORT_RST,
+-						PORT_CS_PORT_RST, 10, 100);
++						PORT_CS_PORT_RST, 10, 100 * speedup_ratio);
+ 			if (tmp & PORT_CS_PORT_RST)
+ 				dev_printk(KERN_ERR, host->dev,
+ 					   "failed to clear port RST\n");
+diff --git a/drivers/char/vt.c b/drivers/char/vt.c
+index 935f1c2..42aa340 100644
+--- a/drivers/char/vt.c
++++ b/drivers/char/vt.c
+@@ -100,6 +100,7 @@
+ #include <linux/font.h>
+ #include <linux/bitops.h>
+ #include <linux/notifier.h>
++#include <linux/dynaccel.h>
+ 
+ #include <asm/io.h>
+ #include <asm/system.h>
+@@ -2859,7 +2860,7 @@ static int __init con_init(void)
+ 
+ 	if (blankinterval) {
+ 		blank_state = blank_normal_wait;
+-		mod_timer(&console_timer, jiffies + blankinterval);
++		mod_timer(&console_timer, jiffies + blankinterval * speedup_ratio);
+ 	}
+ 
+ 	/*
+@@ -3623,7 +3624,7 @@ void do_blank_screen(int entering_gfx)
+ 
+ 	if (vesa_off_interval && vesa_blank_mode) {
+ 		blank_state = blank_vesa_wait;
+-		mod_timer(&console_timer, jiffies + vesa_off_interval);
++		mod_timer(&console_timer, jiffies + vesa_off_interval * speedup_ratio);
+ 	}
+ }
+ EXPORT_SYMBOL(do_blank_screen);
+@@ -3657,7 +3658,7 @@ void do_unblank_screen(int leaving_gfx)
+ 		return; /* but leave console_blanked != 0 */
+ 
+ 	if (blankinterval) {
+-		mod_timer(&console_timer, jiffies + blankinterval);
++		mod_timer(&console_timer, jiffies + blankinterval * speedup_ratio);
+ 		blank_state = blank_normal_wait;
+ 	}
+ 
+@@ -3691,7 +3692,7 @@ void unblank_screen(void)
+ static void blank_screen_t(unsigned long dummy)
+ {
+ 	if (unlikely(!keventd_up())) {
+-		mod_timer(&console_timer, jiffies + blankinterval);
++		mod_timer(&console_timer, jiffies + blankinterval * speedup_ratio);
+ 		return;
+ 	}
+ 	blank_timer_expired = 1;
+@@ -3721,7 +3722,7 @@ void poke_blanked_console(void)
+ 	if (console_blanked)
+ 		unblank_screen();
+ 	else if (blankinterval) {
+-		mod_timer(&console_timer, jiffies + blankinterval);
++		mod_timer(&console_timer, jiffies + blankinterval * speedup_ratio);
+ 		blank_state = blank_normal_wait;
+ 	}
+ }
+diff --git a/drivers/input/input.c b/drivers/input/input.c
+index 27006fc..742ccce 100644
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -21,6 +21,7 @@
+ #include <linux/device.h>
+ #include <linux/mutex.h>
+ #include <linux/rcupdate.h>
++#include <linux/dynaccel.h>
+ 
+ MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
+ MODULE_DESCRIPTION("Input core");
+@@ -114,7 +115,7 @@ static void input_repeat_key(unsigned long data)
+ 
+ 		if (dev->rep[REP_PERIOD])
+ 			mod_timer(&dev->timer, jiffies +
+-					msecs_to_jiffies(dev->rep[REP_PERIOD]));
++					msecs_to_jiffies(dev->rep[REP_PERIOD]) * speedup_ratio);
+ 	}
+ 
+ 	spin_unlock_irqrestore(&dev->event_lock, flags);
+@@ -127,7 +128,7 @@ static void input_start_autorepeat(struct input_dev *dev, int code)
+ 	    dev->timer.data) {
+ 		dev->repeat_key = code;
+ 		mod_timer(&dev->timer,
+-			  jiffies + msecs_to_jiffies(dev->rep[REP_DELAY]));
++			  jiffies + msecs_to_jiffies(dev->rep[REP_DELAY]) * speedup_ratio);
+ 	}
+ }
+ 
+diff --git a/drivers/input/serio/libps2.c b/drivers/input/serio/libps2.c
+index b819239..a26bfd5 100644
+--- a/drivers/input/serio/libps2.c
++++ b/drivers/input/serio/libps2.c
+@@ -19,6 +19,7 @@
+ #include <linux/serio.h>
+ #include <linux/init.h>
+ #include <linux/libps2.h>
++#include <linux/dynaccel.h>
+ 
+ #define DRIVER_DESC	"PS/2 driver library"
+ 
+@@ -53,7 +54,7 @@ int ps2_sendbyte(struct ps2dev *ps2dev, unsigned char byte, int timeout)
+ 	if (serio_write(ps2dev->serio, byte) == 0)
+ 		wait_event_timeout(ps2dev->wait,
+ 				   !(ps2dev->flags & PS2_FLAG_ACK),
+-				   msecs_to_jiffies(timeout));
++				   msecs_to_jiffies(timeout) * speedup_ratio);
+ 
+ 	serio_pause_rx(ps2dev->serio);
+ 	ps2dev->flags &= ~PS2_FLAG_ACK;
+@@ -84,7 +85,7 @@ void ps2_drain(struct ps2dev *ps2dev, int maxbytes, int timeout)
+ 
+ 	wait_event_timeout(ps2dev->wait,
+ 			   !(ps2dev->flags & PS2_FLAG_CMD),
+-			   msecs_to_jiffies(timeout));
++			   msecs_to_jiffies(timeout) * speedup_ratio);
+ 	mutex_unlock(&ps2dev->cmd_mutex);
+ }
+ EXPORT_SYMBOL(ps2_drain);
+@@ -126,8 +127,8 @@ static int ps2_adjust_timeout(struct ps2dev *ps2dev, int command, int timeout)
+ 			 * The next byte will come soon (keyboard) or not
+ 			 * at all (mouse).
+ 			 */
+-			if (timeout > msecs_to_jiffies(100))
+-				timeout = msecs_to_jiffies(100);
++			if (timeout > msecs_to_jiffies(100) * speedup_ratio)
++				timeout = msecs_to_jiffies(100) * speedup_ratio;
+ 			break;
+ 
+ 		case PS2_CMD_GETID:
+@@ -214,16 +215,16 @@ int ps2_command(struct ps2dev *ps2dev, unsigned char *param, int command)
+ 	/*
+ 	 * The reset command takes a long time to execute.
+ 	 */
+-	timeout = msecs_to_jiffies(command == PS2_CMD_RESET_BAT ? 4000 : 500);
++	timeout = msecs_to_jiffies(command == PS2_CMD_RESET_BAT ? 4000 : 500) * speedup_ratio;
+ 
+ 	timeout = wait_event_timeout(ps2dev->wait,
+-				     !(ps2dev->flags & PS2_FLAG_CMD1), timeout);
++				     !(ps2dev->flags & PS2_FLAG_CMD1), timeout * speedup_ratio);
+ 
+ 	if (ps2dev->cmdcnt && timeout > 0) {
+ 
+-		timeout = ps2_adjust_timeout(ps2dev, command, timeout);
++		timeout = ps2_adjust_timeout(ps2dev, command, timeout * speedup_ratio);
+ 		wait_event_timeout(ps2dev->wait,
+-				   !(ps2dev->flags & PS2_FLAG_CMD), timeout);
++				   !(ps2dev->flags & PS2_FLAG_CMD), timeout * speedup_ratio);
+ 	}
+ 
+ 	if (param)
+diff --git a/drivers/rtc/rtc-dev.c b/drivers/rtc/rtc-dev.c
+index 846582b..d2b6de6 100644
+--- a/drivers/rtc/rtc-dev.c
++++ b/drivers/rtc/rtc-dev.c
+@@ -13,6 +13,7 @@
+ 
+ #include <linux/module.h>
+ #include <linux/rtc.h>
++#include <linux/dynaccel.h>
+ #include "rtc-core.h"
+ 
+ static dev_t rtc_devt;
+@@ -67,7 +68,7 @@ static void rtc_uie_task(struct work_struct *work)
+ 	} else if (rtc->oldsecs != tm.tm_sec) {
+ 		num = (tm.tm_sec + 60 - rtc->oldsecs) % 60;
+ 		rtc->oldsecs = tm.tm_sec;
+-		rtc->uie_timer.expires = jiffies + HZ - (HZ/10);
++		rtc->uie_timer.expires = jiffies + (HZ - (HZ/10)) * speedup_ratio;
+ 		rtc->uie_timer_active = 1;
+ 		rtc->uie_task_active = 0;
+ 		add_timer(&rtc->uie_timer);
+diff --git a/drivers/scsi/scsi.c b/drivers/scsi/scsi.c
+index 110e776..a530be2 100644
+--- a/drivers/scsi/scsi.c
++++ b/drivers/scsi/scsi.c
+@@ -54,6 +54,7 @@
+ #include <linux/notifier.h>
+ #include <linux/cpu.h>
+ #include <linux/mutex.h>
++#include <linux/dynaccel.h>
+ 
+ #include <scsi/scsi.h>
+ #include <scsi/scsi_cmnd.h>
+@@ -664,7 +665,7 @@ int scsi_dispatch_cmd(struct scsi_cmnd *cmd)
+ 	 * We will wait MIN_RESET_DELAY clock ticks after the last reset so
+ 	 * we can avoid the drive not being ready.
+ 	 */
+-	timeout = host->last_reset + MIN_RESET_DELAY;
++	timeout = host->last_reset + MIN_RESET_DELAY * speedup_ratio;
+ 
+ 	if (host->resetting && time_before(jiffies, timeout)) {
+ 		int ticks_remaining = timeout - jiffies;
+diff --git a/drivers/scsi/scsi_error.c b/drivers/scsi/scsi_error.c
+index eaf5a8a..abf448d 100644
+--- a/drivers/scsi/scsi_error.c
++++ b/drivers/scsi/scsi_error.c
+@@ -24,6 +24,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/blkdev.h>
+ #include <linux/delay.h>
++#include <linux/dynaccel.h>
+ 
+ #include <scsi/scsi.h>
+ #include <scsi/scsi_cmnd.h>
+@@ -135,7 +136,7 @@ void scsi_add_timer(struct scsi_cmnd *scmd, int timeout,
+ 		del_timer(&scmd->eh_timeout);
+ 
+ 	scmd->eh_timeout.data = (unsigned long)scmd;
+-	scmd->eh_timeout.expires = jiffies + timeout;
++	scmd->eh_timeout.expires = jiffies + timeout * speedup_ratio;
+ 	scmd->eh_timeout.function = (void (*)(unsigned long)) complete;
+ 
+ 	SCSI_LOG_ERROR_RECOVERY(5, printk("%s: scmd: %p, time:"
+@@ -798,7 +799,7 @@ static int scsi_send_eh_cmnd(struct scsi_cmnd *scmd, unsigned char *cmnd,
+  */
+ static int scsi_request_sense(struct scsi_cmnd *scmd)
+ {
+-	return scsi_send_eh_cmnd(scmd, NULL, 0, SENSE_TIMEOUT, ~0);
++	return scsi_send_eh_cmnd(scmd, NULL, 0, SENSE_TIMEOUT * speedup_ratio, ~0);
+ }
+ 
+ /**
+@@ -899,7 +900,7 @@ static int scsi_eh_tur(struct scsi_cmnd *scmd)
+ 	int retry_cnt = 1, rtn;
+ 
+ retry_tur:
+-	rtn = scsi_send_eh_cmnd(scmd, tur_command, 6, SENSE_TIMEOUT, 0);
++	rtn = scsi_send_eh_cmnd(scmd, tur_command, 6, SENSE_TIMEOUT * speedup_ratio, 0);
+ 
+ 	SCSI_LOG_ERROR_RECOVERY(3, printk("%s: scmd %p rtn %x\n",
+ 		__FUNCTION__, scmd, rtn));
+diff --git a/drivers/scsi/scsi_ioctl.c b/drivers/scsi/scsi_ioctl.c
+index 28b19ef..cb12993 100644
+--- a/drivers/scsi/scsi_ioctl.c
++++ b/drivers/scsi/scsi_ioctl.c
+@@ -12,6 +12,7 @@
+ #include <linux/sched.h>
+ #include <linux/mm.h>
+ #include <linux/string.h>
++#include <linux/dynaccel.h>
+ #include <asm/uaccess.h>
+ 
+ #include <scsi/scsi.h>
+@@ -147,7 +148,7 @@ int scsi_set_medium_removal(struct scsi_device *sdev, char state)
+ 	scsi_cmd[5] = 0;
+ 
+ 	ret = ioctl_internal_command(sdev, scsi_cmd,
+-			IOCTL_NORMAL_TIMEOUT, NORMAL_RETRIES);
++			IOCTL_NORMAL_TIMEOUT * speedup_ratio, NORMAL_RETRIES);
+ 	if (ret == 0)
+ 		sdev->locked = (state == SCSI_REMOVAL_PREVENT);
+ 	return ret;
+@@ -243,7 +244,7 @@ int scsi_ioctl(struct scsi_device *sdev, int cmd, void __user *arg)
+ 	case SCSI_IOCTL_DOORUNLOCK:
+ 		return scsi_set_medium_removal(sdev, SCSI_REMOVAL_ALLOW);
+ 	case SCSI_IOCTL_TEST_UNIT_READY:
+-		return scsi_test_unit_ready(sdev, IOCTL_NORMAL_TIMEOUT,
++		return scsi_test_unit_ready(sdev, IOCTL_NORMAL_TIMEOUT * speedup_ratio,
+ 					    NORMAL_RETRIES, NULL);
+ 	case SCSI_IOCTL_START_UNIT:
+ 		scsi_cmd[0] = START_STOP;
+diff --git a/drivers/scsi/scsi_lib.c b/drivers/scsi/scsi_lib.c
+index cbf55d5..9e3989d 100644
+--- a/drivers/scsi/scsi_lib.c
++++ b/drivers/scsi/scsi_lib.c
+@@ -19,6 +19,7 @@
+ #include <linux/delay.h>
+ #include <linux/hardirq.h>
+ #include <linux/scatterlist.h>
++#include <linux/dynaccel.h>
+ 
+ #include <scsi/scsi.h>
+ #include <scsi/scsi_cmnd.h>
+@@ -1393,7 +1394,7 @@ static void scsi_softirq_done(struct request *rq)
+ 
+ 	disposition = scsi_decide_disposition(cmd);
+ 	if (disposition != SUCCESS &&
+-	    time_before(cmd->jiffies_at_alloc + wait_for, jiffies)) {
++	    time_before(cmd->jiffies_at_alloc + wait_for * speedup_ratio, jiffies)) {
+ 		sdev_printk(KERN_ERR, cmd->device,
+ 			    "timing out command, waited %lus\n",
+ 			    wait_for/HZ);
+@@ -2267,7 +2268,7 @@ scsi_device_quiesce(struct scsi_device *sdev)
+ 
+ 	scsi_run_queue(sdev->request_queue);
+ 	while (sdev->device_busy) {
+-		msleep_interruptible(200);
++		msleep_interruptible(200 * speedup_ratio);
+ 		scsi_run_queue(sdev->request_queue);
+ 	}
+ 	return 0;
+diff --git a/drivers/scsi/sd.c b/drivers/scsi/sd.c
+index 01cefbb..0c00479 100644
+--- a/drivers/scsi/sd.c
++++ b/drivers/scsi/sd.c
+@@ -47,6 +47,7 @@
+ #include <linux/blkpg.h>
+ #include <linux/delay.h>
+ #include <linux/mutex.h>
++#include <linux/dynaccel.h>
+ #include <asm/uaccess.h>
+ 
+ #include <scsi/scsi.h>
+@@ -143,7 +144,7 @@ sd_store_cache_type(struct device *dev, struct device_attribute *attr,
+ 		return -EINVAL;
+ 	rcd = ct & 0x01 ? 1 : 0;
+ 	wce = ct & 0x02 ? 1 : 0;
+-	if (scsi_mode_sense(sdp, 0x08, 8, buffer, sizeof(buffer), SD_TIMEOUT,
++	if (scsi_mode_sense(sdp, 0x08, 8, buffer, sizeof(buffer), SD_TIMEOUT * speedup_ratio,
+ 			    SD_MAX_RETRIES, &data, NULL))
+ 		return -EINVAL;
+ 	len = min_t(size_t, sizeof(buffer), data.length - data.header_length -
+@@ -154,7 +155,7 @@ sd_store_cache_type(struct device *dev, struct device_attribute *attr,
+ 	buffer_data[2] |= wce << 2 | rcd;
+ 	sp = buffer_data[0] & 0x80 ? 1 : 0;
+ 
+-	if (scsi_mode_select(sdp, 1, sp, 8, buffer_data, len, SD_TIMEOUT,
++	if (scsi_mode_select(sdp, 1, sp, 8, buffer_data, len, SD_TIMEOUT * speedup_ratio,
+ 			     SD_MAX_RETRIES, &data, &sshdr)) {
+ 		if (scsi_sense_valid(&sshdr))
+ 			sd_print_sense_hdr(sdkp, &sshdr);
+@@ -788,7 +789,7 @@ static int sd_media_changed(struct gendisk *disk)
+ 
+ 	if (scsi_block_when_processing_errors(sdp)) {
+ 		sshdr  = kzalloc(sizeof(*sshdr), GFP_KERNEL);
+-		retval = scsi_test_unit_ready(sdp, SD_TIMEOUT, SD_MAX_RETRIES,
++		retval = scsi_test_unit_ready(sdp, SD_TIMEOUT * speedup_ratio, SD_MAX_RETRIES,
+ 					      sshdr);
+ 	}
+ 
+@@ -842,7 +843,7 @@ static int sd_sync_cache(struct scsi_disk *sdkp)
+ 		 * flush everything.
+ 		 */
+ 		res = scsi_execute_req(sdp, cmd, DMA_NONE, NULL, 0, &sshdr,
+-				       SD_TIMEOUT, SD_MAX_RETRIES);
++				       SD_TIMEOUT * speedup_ratio, SD_MAX_RETRIES);
+ 		if (res == 0)
+ 			break;
+ 	}
+@@ -861,7 +862,7 @@ static int sd_sync_cache(struct scsi_disk *sdkp)
+ static void sd_prepare_flush(struct request_queue *q, struct request *rq)
+ {
+ 	rq->cmd_type = REQ_TYPE_BLOCK_PC;
+-	rq->timeout = SD_TIMEOUT;
++	rq->timeout = SD_TIMEOUT * speedup_ratio;
+ 	rq->cmd[0] = SYNCHRONIZE_CACHE;
+ 	rq->cmd_len = 10;
+ }
+@@ -1069,7 +1070,7 @@ sd_spinup_disk(struct scsi_disk *sdkp)
+ 
+ 			the_result = scsi_execute_req(sdkp->device, cmd,
+ 						      DMA_NONE, NULL, 0,
+-						      &sshdr, SD_TIMEOUT,
++						      &sshdr, SD_TIMEOUT * speedup_ratio,
+ 						      SD_MAX_RETRIES);
+ 
+ 			/*
+@@ -1126,12 +1127,12 @@ sd_spinup_disk(struct scsi_disk *sdkp)
+ 				cmd[4] = 1;	/* Start spin cycle */
+ 				scsi_execute_req(sdkp->device, cmd, DMA_NONE,
+ 						 NULL, 0, &sshdr,
+-						 SD_TIMEOUT, SD_MAX_RETRIES);
+-				spintime_expire = jiffies + 100 * HZ;
++						 SD_TIMEOUT * speedup_ratio, SD_MAX_RETRIES);
++				spintime_expire = jiffies + 100 * HZ * speedup_ratio;
+ 				spintime = 1;
+ 			}
+ 			/* Wait 1 second for next try */
+-			msleep(1000);
++			msleep(1000 * speedup_ratio);
+ 			printk(".");
+ 
+ 		/*
+@@ -1143,11 +1144,11 @@ sd_spinup_disk(struct scsi_disk *sdkp)
+ 				sshdr.sense_key == UNIT_ATTENTION &&
+ 				sshdr.asc == 0x28) {
+ 			if (!spintime) {
+-				spintime_expire = jiffies + 5 * HZ;
++				spintime_expire = jiffies + 5 * HZ * speedup_ratio;
+ 				spintime = 1;
+ 			}
+ 			/* Wait 1 second for next try */
+-			msleep(1000);
++			msleep(1000 * speedup_ratio);
+ 		} else {
+ 			/* we don't understand the sense code, so it's
+ 			 * probably pointless to loop */
+@@ -1199,7 +1200,7 @@ repeat:
+ 		
+ 		the_result = scsi_execute_req(sdp, cmd, DMA_FROM_DEVICE,
+ 					      buffer, longrc ? 12 : 8, &sshdr,
+-					      SD_TIMEOUT, SD_MAX_RETRIES);
++					      SD_TIMEOUT * speedup_ratio, SD_MAX_RETRIES);
+ 
+ 		if (media_not_present(sdkp, &sshdr))
+ 			return;
+@@ -1361,7 +1362,7 @@ sd_do_mode_sense(struct scsi_device *sdp, int dbd, int modepage,
+ 		 struct scsi_sense_hdr *sshdr)
+ {
+ 	return scsi_mode_sense(sdp, dbd, modepage, buffer, len,
+-			       SD_TIMEOUT, SD_MAX_RETRIES, data,
++			       SD_TIMEOUT * speedup_ratio, SD_MAX_RETRIES, data,
+ 			       sshdr);
+ }
+ 
+@@ -1667,9 +1668,9 @@ static int sd_probe(struct device *dev)
+ 
+ 	if (!sdp->timeout) {
+ 		if (sdp->type != TYPE_MOD)
+-			sdp->timeout = SD_TIMEOUT;
++			sdp->timeout = SD_TIMEOUT * speedup_ratio;
+ 		else
+-			sdp->timeout = SD_MOD_TIMEOUT;
++			sdp->timeout = SD_MOD_TIMEOUT * speedup_ratio;
+ 	}
+ 
+ 	device_initialize(&sdkp->dev);
+@@ -1794,7 +1795,7 @@ static int sd_start_stop_device(struct scsi_disk *sdkp, int start)
+ 		return -ENODEV;
+ 
+ 	res = scsi_execute_req(sdp, cmd, DMA_NONE, NULL, 0, &sshdr,
+-			       SD_TIMEOUT, SD_MAX_RETRIES);
++			       SD_TIMEOUT * speedup_ratio, SD_MAX_RETRIES);
+ 	if (res) {
+ 		sd_printk(KERN_WARNING, sdkp, "START_STOP FAILED\n");
+ 		sd_print_result(sdkp, res);
+diff --git a/fs/aio.c b/fs/aio.c
+index f1c7b64..120c7f3 100644
+--- a/fs/aio.c
++++ b/fs/aio.c
+@@ -31,6 +31,7 @@
+ #include <linux/workqueue.h>
+ #include <linux/security.h>
+ #include <linux/eventfd.h>
++#include <linux/dynaccel.h>
+ 
+ #include <asm/kmap_types.h>
+ #include <asm/uaccess.h>
+@@ -1082,7 +1083,7 @@ static inline void init_timeout(struct aio_timeout *to)
+ static inline void set_timeout(long start_jiffies, struct aio_timeout *to,
+ 			       const struct timespec *ts)
+ {
+-	to->timer.expires = start_jiffies + timespec_to_jiffies(ts);
++	to->timer.expires = start_jiffies + timespec_to_jiffies(ts) * speedup_ratio;
+ 	if (time_after(to->timer.expires, jiffies))
+ 		add_timer(&to->timer);
+ 	else
+diff --git a/fs/jbd/journal.c b/fs/jbd/journal.c
+index b99c3b3..f081fd4 100644
+--- a/fs/jbd/journal.c
++++ b/fs/jbd/journal.c
+@@ -36,6 +36,7 @@
+ #include <linux/poison.h>
+ #include <linux/proc_fs.h>
+ #include <linux/debugfs.h>
++#include <linux/dynaccel.h>
+ 
+ #include <asm/uaccess.h>
+ #include <asm/page.h>
+@@ -177,7 +178,7 @@ loop:
+ 			should_sleep = 0;
+ 		transaction = journal->j_running_transaction;
+ 		if (transaction && time_after_eq(jiffies,
+-						transaction->t_expires))
++						transaction->t_expires * speedup_ratio))
+ 			should_sleep = 0;
+ 		if (journal->j_flags & JFS_UNMOUNT)
+ 			should_sleep = 0;
+@@ -195,7 +196,7 @@ loop:
+ 	 * Were we woken up by a commit wakeup event?
+ 	 */
+ 	transaction = journal->j_running_transaction;
+-	if (transaction && time_after_eq(jiffies, transaction->t_expires)) {
++	if (transaction && time_after_eq(jiffies, transaction->t_expires * speedup_ratio)) {
+ 		journal->j_commit_request = transaction->t_tid;
+ 		jbd_debug(1, "woke because of timeout\n");
+ 	}
+@@ -1655,7 +1656,7 @@ static struct journal_head *journal_alloc_journal_head(void)
+ 	ret = kmem_cache_alloc(journal_head_cache, GFP_NOFS);
+ 	if (ret == NULL) {
+ 		jbd_debug(1, "out of memory for journal_head\n");
+-		if (time_after(jiffies, last_warning + 5*HZ)) {
++		if (time_after(jiffies, last_warning + 5*HZ * speedup_ratio)) {
+ 			printk(KERN_NOTICE "ENOMEM in %s, retrying.\n",
+ 			       __func__);
+ 			last_warning = jiffies;
+diff --git a/fs/jbd/transaction.c b/fs/jbd/transaction.c
+index 8dee320..c7b394f 100644
+--- a/fs/jbd/transaction.c
++++ b/fs/jbd/transaction.c
+@@ -25,6 +25,7 @@
+ #include <linux/timer.h>
+ #include <linux/mm.h>
+ #include <linux/highmem.h>
++#include <linux/dynaccel.h>
+ 
+ static void __journal_temp_unlink_buffer(struct journal_head *jh);
+ 
+@@ -50,7 +51,7 @@ get_transaction(journal_t *journal, transaction_t *transaction)
+ 	transaction->t_journal = journal;
+ 	transaction->t_state = T_RUNNING;
+ 	transaction->t_tid = journal->j_transaction_sequence++;
+-	transaction->t_expires = jiffies + journal->j_commit_interval;
++	transaction->t_expires = jiffies + journal->j_commit_interval * speedup_ratio;
+ 	spin_lock_init(&transaction->t_handle_lock);
+ 
+ 	/* Set up the commit timer for the new transaction. */
+diff --git a/fs/locks.c b/fs/locks.c
+index bdc0be3..470a60f 100644
+--- a/fs/locks.c
++++ b/fs/locks.c
+@@ -127,6 +127,7 @@
+ #include <linux/time.h>
+ #include <linux/rcupdate.h>
+ #include <linux/pid_namespace.h>
++#include <linux/dynaccel.h>
+ 
+ #include <asm/uaccess.h>
+ 
+@@ -1218,7 +1219,7 @@ int __break_lease(struct inode *inode, unsigned int mode)
+ 
+ 	break_time = 0;
+ 	if (lease_break_time > 0) {
+-		break_time = jiffies + lease_break_time * HZ;
++		break_time = jiffies + (lease_break_time * HZ) * speedup_ratio;
+ 		if (break_time == 0)
+ 			break_time++;	/* so that 0 means no break time */
+ 	}
+diff --git a/fs/select.c b/fs/select.c
+index d575e4f..35279b1 100644
+--- a/fs/select.c
++++ b/fs/select.c
+@@ -24,6 +24,7 @@
+ #include <linux/fdtable.h>
+ #include <linux/fs.h>
+ #include <linux/rcupdate.h>
++#include <linux/dynaccel.h>
+ 
+ #include <asm/uaccess.h>
+ 
+@@ -624,7 +625,7 @@ static int do_poll(unsigned int nfds,  struct poll_list *list,
+ 		if (*timeout < 0) {
+ 			/* Wait indefinitely */
+ 			__timeout = MAX_SCHEDULE_TIMEOUT;
+-		} else if (unlikely(*timeout >= (s64)MAX_SCHEDULE_TIMEOUT-1)) {
++		} else if (unlikely(*timeout >= (s64)MAX_SCHEDULE_TIMEOUT - 1)) {
+ 			/*
+ 			 * Wait for longer than MAX_SCHEDULE_TIMEOUT. Do it in
+ 			 * a loop
+@@ -741,10 +742,10 @@ SYSCALL_DEFINE3(poll, struct pollfd __user *, ufds, unsigned int, nfds,
+ 			timeout_jiffies = -1;
+ 		else
+ #endif
+-			timeout_jiffies = msecs_to_jiffies(timeout_msecs) + 1;
++			timeout_jiffies = (msecs_to_jiffies(timeout_msecs) + 1) * speedup_ratio;
+ 	} else {
+ 		/* Infinite (< 0) or no (0) timeout */
+-		timeout_jiffies = timeout_msecs;
++		timeout_jiffies = timeout_msecs * speedup_ratio;
+ 	}
+ 
+ 	ret = do_sys_poll(ufds, nfds, &timeout_jiffies);
+diff --git a/include/linux/dynaccel.h b/include/linux/dynaccel.h
+new file mode 100644
+index 0000000..d5aeb07
+--- /dev/null
++++ b/include/linux/dynaccel.h
+@@ -0,0 +1,17 @@
++/*
++ *  Dynamic (fake) Acceleration for Linux
++ *
++ *  Copyright (C) 2011 TOSHIBA CORPORATION
++ *
++ */
++
++#ifndef _LINUX_DYNACCEL_H
++#define _LINUX_DYNACCEL_H
++
++#define DEFAULT_SPEEDUP_RATIO   1   /* No accelerarion */
++
++#ifdef __KERNEL__
++extern unsigned int speedup_ratio;
++#endif  /* __KERNEL */
++
++#endif	/* _LINUX_DYNACCEL_H */
+diff --git a/include/linux/sysctl.h b/include/linux/sysctl.h
+index 24141b4..974f885 100644
+--- a/include/linux/sysctl.h
++++ b/include/linux/sysctl.h
+@@ -163,6 +163,7 @@ enum
+ 	KERN_MAX_LOCK_DEPTH=74,
+ 	KERN_NMI_WATCHDOG=75, /* int: enable/disable nmi watchdog */
+ 	KERN_PANIC_ON_NMI=76, /* int: whether we will panic on an unrecovered */
++	KERN_ACCEL=77,
+ };
+ 
+ 
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index 027c008..3460d70 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -46,6 +46,7 @@
+ #include <linux/nfs_fs.h>
+ #include <linux/acpi.h>
+ #include <linux/reboot.h>
++#include <linux/dynaccel.h>
+ 
+ #include <asm/uaccess.h>
+ #include <asm/processor.h>
+@@ -842,6 +843,16 @@ static struct ctl_table kern_table[] = {
+ 		.child		= key_sysctls,
+ 	},
+ #endif
++	{
++		.ctl_name       = KERN_ACCEL,
++		.procname       = "accel",
++		.data           = &speedup_ratio,
++		.maxlen         = sizeof (int),
++		.mode           = 0644,
++		.proc_handler   = &proc_dointvec,
++	},
++
++
+ /*
+  * NOTE: do not add new entries to this table unless you have read
+  * Documentation/sysctl/ctl_unnumbered.txt
+diff --git a/kernel/timer.c b/kernel/timer.c
+index 069574e..806ec80 100644
+--- a/kernel/timer.c
++++ b/kernel/timer.c
+@@ -37,6 +37,7 @@
+ #include <linux/delay.h>
+ #include <linux/tick.h>
+ #include <linux/kallsyms.h>
++#include <linux/dynaccel.h>
+ 
+ #include <asm/uaccess.h>
+ #include <asm/unistd.h>
+@@ -45,8 +46,10 @@
+ #include <asm/io.h>
+ 
+ u64 jiffies_64 __cacheline_aligned_in_smp = INITIAL_JIFFIES;
++unsigned int speedup_ratio = DEFAULT_SPEEDUP_RATIO;
+ 
+ EXPORT_SYMBOL(jiffies_64);
++EXPORT_SYMBOL(speedup_ratio);
+ 
+ /*
+  * per-CPU timer vector definitions:
+@@ -1073,8 +1076,8 @@ static inline void update_times(unsigned long ticks)
+ 
+ void do_timer(unsigned long ticks)
+ {
+-	jiffies_64 += ticks;
+-	update_times(ticks);
++	jiffies_64 += ticks * speedup_ratio;
++	update_times(ticks * speedup_ratio);
+ }
+ 
+ #ifdef __ARCH_WANT_SYS_ALARM
+@@ -1219,7 +1222,7 @@ signed long __sched schedule_timeout(signed long timeout)
+ 		}
+ 	}
+ 
+-	expire = timeout + jiffies;
++	expire = (timeout * speedup_ratio) + jiffies;
+ 
+ 	setup_timer_on_stack(&timer, process_timeout, (unsigned long)current);
+ 	__mod_timer(&timer, expire);
